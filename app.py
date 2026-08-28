@@ -8,7 +8,7 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard de Vendas & Estoque</title>
+    <title>Dashboard de Vendas & Caixa Pro</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         :root {
@@ -23,21 +23,31 @@ HTML_TEMPLATE = '''
             --border: #e2e8f0;
         }
 
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: sans-serif; }
-        body { background-color: var(--bg-color); color: var(--text-dark); padding: 15px; max-width: 1200px; margin: 0 auto; }
-        header { margin-bottom: 20px; text-align: center; }
-        header h1 { font-size: 22px; color: var(--text-dark); }
+        body.dark-mode {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-dark: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #334155;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text-dark); padding: 15px; max-width: 1200px; margin: 0 auto; transition: background 0.3s, color 0.3s; }
         
-        .grid-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .form-card { background: var(--card-bg); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
-        .form-card h2 { font-size: 15px; margin-bottom: 12px; color: var(--primary); }
-        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        header h1 { font-size: 20px; }
+        .btn-theme { background: var(--border); border: none; padding: 8px 12px; border-radius: 20px; cursor: pointer; color: var(--text-dark); font-size: 12px; font-weight: bold; }
+
+        .grid-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .form-card { background: var(--card-bg); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        .form-card h2 { font-size: 14px; margin-bottom: 12px; color: var(--primary); }
+        .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
         .form-group { display: flex; flex-direction: column; }
-        .form-group label { font-size: 11px; font-weight: bold; margin-bottom: 4px; }
-        .form-group input, .form-group select { padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+        .form-group label { font-size: 11px; font-weight: bold; margin-bottom: 4px; color: var(--text-muted); }
+        .form-group input, .form-group select { padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: var(--card-bg); color: var(--text-dark); }
         .btn-submit { grid-column: 1 / -1; background-color: var(--primary); color: white; border: none; padding: 10px; border-radius: 6px; font-size: 14px; font-weight: bold; cursor: pointer; margin-top: 5px; }
 
-        .kpi-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 20px; }
+        .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 20px; }
         .kpi-card { background: var(--card-bg); padding: 12px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border-left: 4px solid var(--primary); }
         .kpi-card.green { border-left-color: var(--success); }
         .kpi-card.amber { border-left-color: var(--warning); }
@@ -46,58 +56,93 @@ HTML_TEMPLATE = '''
         .kpi-card .value { font-size: 18px; font-weight: bold; margin-top: 4px; }
 
         .dashboard-content { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .chart-card, .table-card { background: var(--card-bg); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
-        .card-header { font-size: 14px; font-weight: bold; margin-bottom: 10px; }
+        .chart-card, .table-card { background: var(--card-bg); padding: 15px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        .card-header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px; }
+        .card-header { font-size: 14px; font-weight: bold; }
         
+        .search-input { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; background: var(--card-bg); color: var(--text-dark); }
+
         .table-responsive { overflow-x: auto; }
         table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
-        th, td { padding: 8px; border-bottom: 1px solid var(--border); }
+        th, td { padding: 10px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
         .badge { padding: 3px 6px; border-radius: 8px; font-size: 10px; font-weight: bold; }
         .badge-paid { background: #dcfce7; color: var(--success); }
         .badge-pending { background: #fef3c7; color: var(--warning); }
         .badge-low { background: #fee2e2; color: var(--danger); }
         .badge-ok { background: #dcfce7; color: var(--success); }
-        .btn-action { background: none; border: none; color: var(--danger); cursor: pointer; }
+        .btn-action { background: none; border: none; cursor: pointer; font-size: 14px; margin-right: 4px; }
+
+        .summary-box { background: var(--card-bg); padding: 15px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 10px; }
+        .summary-item { background: var(--bg-color); padding: 10px; border-radius: 8px; text-align: center; }
+        .summary-item label { font-size: 10px; text-transform: uppercase; color: var(--text-muted); display: block; }
+        .summary-item span { font-weight: bold; font-size: 14px; }
     </style>
 </head>
 <body>
 
     <header>
-        <h1>📊 Vendas & Controle de Estoque</h1>
+        <h1>📊 Gestão de Vendas & Caixa Pro</h1>
+        <button class="btn-theme" onclick="toggleDarkMode()">🌙 Tema</button>
     </header>
 
     <div class="grid-forms">
-        <!-- Cadastrar Novo Produto no Estoque -->
+        <!-- FORMULARIO DE ESTOQUE COM PREÇO DE CUSTO -->
         <div class="form-card">
-            <h2>📦 Adicionar/Atualizar Estoque</h2>
+            <h2>📦 Cadastrar / Atualizar Estoque</h2>
             <form id="stockForm" class="form-grid">
-                <div class="form-group">
-                    <label>Nome do Produto</label>
-                    <input type="text" id="stockProductName" placeholder="Ex: Camiseta" required>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label>Produto</label>
+                    <input type="text" id="stockProductName" placeholder="Ex: Camiseta Nike" required>
                 </div>
                 <div class="form-group">
                     <label>Qtd em Estoque</label>
                     <input type="number" id="stockQuantity" min="0" value="10" required>
                 </div>
-                <button type="submit" class="btn-submit" style="background-color: var(--success);">Salvar no Estoque</button>
+                <div class="form-group">
+                    <label>Preço Custo (R$)</label>
+                    <input type="number" id="costPrice" step="0.01" min="0" placeholder="0.00" required>
+                </div>
+                <button type="submit" class="btn-submit" style="background-color: var(--success);">Salvar Produto</button>
             </form>
         </div>
 
-        <!-- Lançar Venda -->
+        <!-- FORMULARIO DE VENDA AVANÇADO -->
         <div class="form-card">
             <h2>🛒 Registrar Venda</h2>
             <form id="saleForm" class="form-grid">
-                <div class="form-group">
-                    <label>Selecione o Produto</label>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label>Cliente (Nome / WhatsApp)</label>
+                    <input type="text" id="customerName" placeholder="Ex: João (99) 99999-9999">
+                </div>
+                <div class="form-group" style="grid-column: 1 / -1;">
+                    <label>Produto</label>
                     <select id="saleProductSelect" required></select>
                 </div>
                 <div class="form-group">
-                    <label>Quantidade Vendida</label>
+                    <label>Qtd Vendida</label>
                     <input type="number" id="saleQuantity" min="1" value="1" required>
                 </div>
                 <div class="form-group">
-                    <label>Valor Unitário (R$)</label>
+                    <label>Valor Unit. (R$)</label>
                     <input type="number" id="unitPrice" step="0.01" min="0" placeholder="0.00" required>
+                </div>
+                <div class="form-group">
+                    <label>Desconto (R$)</label>
+                    <input type="number" id="discount" step="0.01" min="0" value="0.00">
+                </div>
+                <div class="form-group">
+                    <label>Taxas/Frete (R$)</label>
+                    <input type="number" id="fees" step="0.01" min="0" value="0.00">
+                </div>
+                <div class="form-group">
+                    <label>Pagamento</label>
+                    <select id="paymentMethod">
+                        <option value="Pix">Pix</option>
+                        <option value="Dinheiro">Dinheiro</option>
+                        <option value="Cartão de Crédito">Cartão de Crédito</option>
+                        <option value="Cartão de Débito">Cartão de Débito</option>
+                    </select>
                 </div>
                 <div class="form-group">
                     <label>Status</label>
@@ -106,19 +151,23 @@ HTML_TEMPLATE = '''
                         <option value="Pendente">Pendente</option>
                     </select>
                 </div>
-                <button type="submit" class="btn-submit">Dar Baixa e Vender</button>
+                <button type="submit" class="btn-submit">Finalizar e Baixar Estoque</button>
             </form>
         </div>
     </div>
 
-    <!-- Indicadores -->
+    <!-- PAINEL DE KPIS COM LUCRO REAL -->
     <div class="kpi-grid">
         <div class="kpi-card green">
-            <h3>Recebido</h3>
+            <h3>Faturamento</h3>
             <div class="value" id="kpiReceived">R$ 0,00</div>
         </div>
+        <div class="kpi-card green">
+            <h3>Lucro Liquido</h3>
+            <div class="value" id="kpiProfit">R$ 0,00</div>
+        </div>
         <div class="kpi-card amber">
-            <h3>Pendente</h3>
+            <h3>A Receber (Pendente)</h3>
             <div class="value" id="kpiPending">R$ 0,00</div>
         </div>
         <div class="kpi-card">
@@ -126,21 +175,48 @@ HTML_TEMPLATE = '''
             <div class="value" id="kpiTotalSales">0</div>
         </div>
         <div class="kpi-card red">
-            <h3>Alertas de Estoque Baixo</h3>
+            <h3>Estoque Baixo</h3>
             <div class="value" id="kpiLowStock">0 prod.</div>
         </div>
     </div>
 
-    <!-- Tabela de Estoque -->
+    <!-- FECHAMENTO DE CAIXA POR FORMA DE PAGAMENTO -->
+    <div class="summary-box">
+        <div class="card-header">💵 Resumo de Caixa por Método de Pagamento</div>
+        <div class="summary-grid">
+            <div class="summary-item">
+                <label>Pix</label>
+                <span id="sumPix">R$ 0,00</span>
+            </div>
+            <div class="summary-item">
+                <label>Dinheiro</label>
+                <span id="sumMoney">R$ 0,00</span>
+            </div>
+            <div class="summary-item">
+                <label>Crédito</label>
+                <span id="sumCredit">R$ 0,00</span>
+            </div>
+            <div class="summary-item">
+                <label>Débito</label>
+                <span id="sumDebit">R$ 0,00</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- TABELA DE ESTOQUE -->
     <div class="table-card" style="margin-bottom: 20px;">
-        <div class="card-header">📦 Posição Atual do Estoque</div>
+        <div class="card-header-flex">
+            <div class="card-header">📦 Posição do Estoque</div>
+            <input type="text" id="searchStock" class="search-input" placeholder="Buscar produto..." onkeyup="renderStockTable()">
+        </div>
         <div class="table-responsive">
             <table>
                 <thead>
                     <tr>
                         <th>Produto</th>
-                        <th>Qtd Restante</th>
-                        <th>Status Estoque</th>
+                        <th>Custo Unit.</th>
+                        <th>Qtd. Restante</th>
+                        <th>Status</th>
                         <th>Ação</th>
                     </tr>
                 </thead>
@@ -149,30 +225,36 @@ HTML_TEMPLATE = '''
         </div>
     </div>
 
-    <!-- Gráficos -->
+    <!-- GRÁFICOS -->
     <div class="dashboard-content">
         <div class="chart-card">
-            <div class="card-header">Status Financeiro</div>
+            <div class="card-header">Recebido vs Pendente</div>
             <canvas id="statusChart"></canvas>
         </div>
         <div class="chart-card">
-            <div class="card-header">Faturamento por Produto</div>
-            <canvas id="productChart"></canvas>
+            <div class="card-header">Vendas por Meio de Pagamento</div>
+            <canvas id="methodChart"></canvas>
         </div>
     </div>
 
-    <!-- Tabela de Vendas -->
+    <!-- HISTÓRICO DE VENDAS COMPLETO -->
     <div class="table-card">
-        <div class="card-header">📋 Histórico de Vendas</div>
+        <div class="card-header-flex">
+            <div class="card-header">📋 Histórico de Vendas</div>
+            <input type="text" id="searchSales" class="search-input" placeholder="Buscar venda ou cliente..." onkeyup="renderSalesTable()">
+        </div>
         <div class="table-responsive">
             <table>
                 <thead>
                     <tr>
+                        <th>Cliente</th>
                         <th>Produto</th>
                         <th>Qtd.</th>
-                        <th>Total</th>
+                        <th>Total Final</th>
+                        <th>Lucro</th>
+                        <th>Método</th>
                         <th>Status</th>
-                        <th>Excluir</th>
+                        <th>Ações</th>
                     </tr>
                 </thead>
                 <tbody id="salesTableBody"></tbody>
@@ -182,15 +264,19 @@ HTML_TEMPLATE = '''
 
     <script>
         let inventory = JSON.parse(localStorage.getItem('my_inventory')) || [
-            { product: 'Camiseta', qty: 15 },
-            { product: 'Calça Jeans', qty: 3 }
+            { product: 'Camiseta Nike', qty: 15, cost: 30.0 },
+            { product: 'Calça Jeans', qty: 3, cost: 60.0 }
         ];
 
         let sales = JSON.parse(localStorage.getItem('my_dashboard_sales')) || [
-            { id: 1, product: 'Camiseta', qty: 2, price: 50.0, status: 'Pago' }
+            { id: 1, customer: 'João', product: 'Camiseta Nike', qty: 2, price: 60.0, discount: 0, fees: 0, cost: 30.0, method: 'Pix', status: 'Pago' }
         ];
 
-        let statusChart, productChart;
+        let statusChart, methodChart;
+
+        function toggleDarkMode() {
+            document.body.classList.toggle('dark-mode');
+        }
 
         function saveAndRender() {
             localStorage.setItem('my_inventory', JSON.stringify(inventory));
@@ -211,43 +297,66 @@ HTML_TEMPLATE = '''
             const select = document.getElementById('saleProductSelect');
             select.innerHTML = '';
             if (inventory.length === 0) {
-                select.innerHTML = '<option value="">Cadastre um produto no estoque primeiro</option>';
+                select.innerHTML = '<option value="">Cadastre um produto primeiro</option>';
                 return;
             }
             inventory.forEach(item => {
                 const opt = document.createElement('option');
                 opt.value = item.product;
-                opt.innerText = `${item.product} (${item.qty} em estoque)`;
+                opt.innerText = `${item.product} (${item.qty} un.) - Custo: R$ ${item.cost.toFixed(2)}`;
                 select.appendChild(opt);
             });
         }
 
         function updateKPIs() {
-            let received = 0, pending = 0;
+            let received = 0, pending = 0, profit = 0;
+            let sumPix = 0, sumMoney = 0, sumCredit = 0, sumDebit = 0;
+
             sales.forEach(s => {
-                const total = s.qty * s.price;
-                if (s.status === 'Pago') received += total;
-                else pending += total;
+                const totalSale = (s.qty * s.price) - (s.discount || 0) + (s.fees || 0);
+                const totalCost = s.qty * (s.cost || 0);
+                const saleProfit = totalSale - totalCost;
+
+                if (s.status === 'Pago') {
+                    received += totalSale;
+                    profit += saleProfit;
+
+                    if (s.method === 'Pix') sumPix += totalSale;
+                    else if (s.method === 'Dinheiro') sumMoney += totalSale;
+                    else if (s.method === 'Cartão de Crédito') sumCredit += totalSale;
+                    else if (s.method === 'Cartão de Débito') sumDebit += totalSale;
+                } else {
+                    pending += totalSale;
+                }
             });
 
             let lowStockCount = inventory.filter(i => i.qty <= 3).length;
 
             document.getElementById('kpiReceived').innerText = formatCurrency(received);
+            document.getElementById('kpiProfit').innerText = formatCurrency(profit);
             document.getElementById('kpiPending').innerText = formatCurrency(pending);
             document.getElementById('kpiTotalSales').innerText = sales.length;
             document.getElementById('kpiLowStock').innerText = lowStockCount + ' prod.';
+
+            document.getElementById('sumPix').innerText = formatCurrency(sumPix);
+            document.getElementById('sumMoney').innerText = formatCurrency(sumMoney);
+            document.getElementById('sumCredit').innerText = formatCurrency(sumCredit);
+            document.getElementById('sumDebit').innerText = formatCurrency(sumDebit);
         }
 
         function renderStockTable() {
             const tbody = document.getElementById('stockTableBody');
+            const query = document.getElementById('searchStock').value.toLowerCase();
             tbody.innerHTML = '';
-            inventory.forEach((item, index) => {
+
+            inventory.filter(i => i.product.toLowerCase().includes(query)).forEach((item, index) => {
                 const badgeClass = item.qty <= 3 ? 'badge-low' : 'badge-ok';
-                const badgeText = item.qty <= 3 ? 'Estoque Baixo ⚠️' : 'OK';
+                const badgeText = item.qty <= 3 ? 'Baixo ⚠️' : 'OK';
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td><strong>${item.product}</strong></td>
-                    <td><strong>${item.qty} unid.</strong></td>
+                    <td>${formatCurrency(item.cost || 0)}</td>
+                    <td>${item.qty} unid.</td>
                     <td><span class="badge ${badgeClass}">${badgeText}</span></td>
                     <td><button class="btn-action" onclick="deleteStock(${index})">❌</button></td>
                 `;
@@ -257,24 +366,61 @@ HTML_TEMPLATE = '''
 
         function renderSalesTable() {
             const tbody = document.getElementById('salesTableBody');
+            const query = document.getElementById('searchSales').value.toLowerCase();
             tbody.innerHTML = '';
-            sales.forEach((s, index) => {
-                const total = s.qty * s.price;
+
+            sales.filter(s => 
+                s.product.toLowerCase().includes(query) || 
+                (s.customer && s.customer.toLowerCase().includes(query))
+            ).forEach((s, index) => {
+                const totalSale = (s.qty * s.price) - (s.discount || 0) + (s.fees || 0);
+                const totalCost = s.qty * (s.cost || 0);
+                const profit = totalSale - totalCost;
                 const badgeClass = s.status === 'Pago' ? 'badge-paid' : 'badge-pending';
+                
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
+                    <td>${s.customer || 'Geral'}</td>
                     <td><strong>${s.product}</strong></td>
                     <td>${s.qty}</td>
-                    <td>${formatCurrency(total)}</td>
+                    <td><strong>${formatCurrency(totalSale)}</strong></td>
+                    <td style="color:${profit >= 0 ? 'var(--success)' : 'var(--danger)'}">${formatCurrency(profit)}</td>
+                    <td>${s.method}</td>
                     <td>
                         <span class="badge ${badgeClass}" style="cursor:pointer;" onclick="toggleStatus(${index})">
                             ${s.status} 🔄
                         </span>
                     </td>
-                    <td><button class="btn-action" onclick="deleteSale(${index})">❌</button></td>
+                    <td>
+                        <button class="btn-action" title="Enviar WhatsApp" onclick="sendWhatsApp(${index})">📲</button>
+                        <button class="btn-action" title="Excluir" onclick="deleteSale(${index})">❌</button>
+                    </td>
                 `;
                 tbody.appendChild(tr);
             });
+        }
+
+        function sendWhatsApp(index) {
+            const s = sales[index];
+            const totalSale = (s.qty * s.price) - (s.discount || 0) + (s.fees || 0);
+            
+            let text = "";
+            if (s.status === 'Pago') {
+                text = `*Comprovante de Compra*\n\n` +
+                       `Cliente: ${s.customer || 'Cliente'}\n` +
+                       `Produto: ${s.product} (x${s.qty})\n` +
+                       `Valor Total: ${formatCurrency(totalSale)}\n` +
+                       `Forma de Pagamento: ${s.method}\n` +
+                       `Status: Pago ✅\n\nObrigado pela preferência!`;
+            } else {
+                text = `*Lembrete de Pagamento*\n\n` +
+                       `Olá ${s.customer || ''}, passando para lembrar referente ao pedido:\n` +
+                       `Produto: ${s.product} (x${s.qty})\n` +
+                       `Valor em Aberto: ${formatCurrency(totalSale)}\n\n` +
+                       `Por favor, entre em contato para combinar o acerto.`;
+            }
+
+            window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`, '_blank');
         }
 
         function toggleStatus(index) {
@@ -294,13 +440,16 @@ HTML_TEMPLATE = '''
 
         function renderCharts() {
             let received = 0, pending = 0;
-            let productTotals = {};
+            let methodTotals = { 'Pix': 0, 'Dinheiro': 0, 'Cartão de Crédito': 0, 'Cartão de Débito': 0 };
 
             sales.forEach(s => {
-                const total = s.qty * s.price;
-                if (s.status === 'Pago') received += total;
-                else pending += total;
-                productTotals[s.product] = (productTotals[s.product] || 0) + total;
+                const totalSale = (s.qty * s.price) - (s.discount || 0) + (s.fees || 0);
+                if (s.status === 'Pago') {
+                    received += totalSale;
+                    if (methodTotals[s.method] !== undefined) methodTotals[s.method] += totalSale;
+                } else {
+                    pending += totalSale;
+                }
             });
 
             const ctxStatus = document.getElementById('statusChart').getContext('2d');
@@ -308,19 +457,19 @@ HTML_TEMPLATE = '''
             statusChart = new Chart(ctxStatus, {
                 type: 'doughnut',
                 data: {
-                    labels: ['Pago (R$)', 'Pendente (R$)'],
+                    labels: ['Pago', 'Pendente'],
                     datasets: [{ data: [received, pending], backgroundColor: ['#16a34a', '#d97706'] }]
                 },
                 options: { responsive: true, plugins: { legend: { position: 'bottom' } } }
             });
 
-            const ctxProd = document.getElementById('productChart').getContext('2d');
-            if (productChart) productChart.destroy();
-            productChart = new Chart(ctxProd, {
+            const ctxMethod = document.getElementById('methodChart').getContext('2d');
+            if (methodChart) methodChart.destroy();
+            methodChart = new Chart(ctxMethod, {
                 type: 'bar',
                 data: {
-                    labels: Object.keys(productTotals),
-                    datasets: [{ label: 'Faturamento (R$)', data: Object.values(productTotals), backgroundColor: '#2563eb' }]
+                    labels: Object.keys(methodTotals),
+                    datasets: [{ label: 'Total (R$)', data: Object.values(methodTotals), backgroundColor: '#2563eb' }]
                 },
                 options: { responsive: true, plugins: { legend: { display: false } } }
             });
@@ -330,12 +479,14 @@ HTML_TEMPLATE = '''
             e.preventDefault();
             const name = document.getElementById('stockProductName').value;
             const qty = parseInt(document.getElementById('stockQuantity').value);
+            const cost = parseFloat(document.getElementById('costPrice').value);
 
             let existing = inventory.find(i => i.product.toLowerCase() === name.toLowerCase());
             if (existing) {
                 existing.qty = qty;
+                existing.cost = cost;
             } else {
-                inventory.push({ product: name, qty: qty });
+                inventory.push({ product: name, qty: qty, cost: cost });
             }
 
             saveAndRender();
@@ -344,29 +495,46 @@ HTML_TEMPLATE = '''
 
         document.getElementById('saleForm').addEventListener('submit', function(e) {
             e.preventDefault();
+            const customer = document.getElementById('customerName').value;
             const productName = document.getElementById('saleProductSelect').value;
             const qty = parseInt(document.getElementById('saleQuantity').value);
             const price = parseFloat(document.getElementById('unitPrice').value);
+            const discount = parseFloat(document.getElementById('discount').value) || 0;
+            const fees = parseFloat(document.getElementById('fees').value) || 0;
+            const method = document.getElementById('paymentMethod').value;
             const status = document.getElementById('paymentStatus').value;
 
             if (!productName) {
-                alert('Cadastre um produto no estoque antes de vender!');
+                alert('Cadastre um produto no estoque antes!');
                 return;
             }
 
             let itemInStock = inventory.find(i => i.product === productName);
             if (!itemInStock || itemInStock.qty < qty) {
-                alert(`Estoque insuficiente! Você só tem ${itemInStock ? itemInStock.qty : 0} unidades de ${productName}.`);
+                alert(`Estoque insuficiente! Apenas ${itemInStock ? itemInStock.qty : 0} em estoque.`);
                 return;
             }
 
             itemInStock.qty -= qty;
 
-            sales.unshift({ id: Date.now(), product: productName, qty, price, status });
+            sales.unshift({
+                id: Date.now(),
+                customer: customer,
+                product: productName,
+                qty: qty,
+                price: price,
+                discount: discount,
+                fees: fees,
+                cost: itemInStock.cost || 0,
+                method: method,
+                status: status
+            });
             saveAndRender();
 
             this.reset();
             document.getElementById('saleQuantity').value = 1;
+            document.getElementById('discount').value = '0.00';
+            document.getElementById('fees').value = '0.00';
         });
 
         saveAndRender();
@@ -380,4 +548,4 @@ def home():
     return render_template_string(HTML_TEMPLATE)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8501)
+    app.run(host='0.0.0.0', port=8501
