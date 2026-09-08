@@ -3,7 +3,7 @@
 # 🚀 Comanda Go! 
 ### *O PDV e Controle de Comandas mais leve, moderno e rápido da web.*
 
-<img src="42841.jpg" alt="Comanda Go Preview Dark Mode" width="100%" style="border-radius: 12px; margin-bottom: 20px;">
+<img src="Screenshot_20260908_013143_Chrome.jpg" alt="Comanda Go Preview Dark Mode" width="100%" style="border-radius: 12px; margin-bottom: 20px;">
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Flask](https://img.shields.io/badge/Flask-Framework-black?style=for-the-badge&logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
