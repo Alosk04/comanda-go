@@ -3,8 +3,6 @@
 # 🚀 Comanda Go! 
 ### *O PDV e Controle de Comandas mais leve, moderno e rápido da web.*
 
-<img src="Screenshot_20260908_013143_Chrome.jpg" alt="Comanda Go Preview Dark Mode" width="100%" style="border-radius: 12px; margin-bottom: 20px;">
-
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Flask](https://img.shields.io/badge/Flask-Framework-black?style=for-the-badge&logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-UI-38B2AC?style=for-the-badge&logo=tailwind-css&logoColor=white)](https://tailwindcss.com/)
@@ -14,6 +12,16 @@
 [✨ Testar Aplicação Online (Demo)](https://dashboardaf.onrender.com) • [🐛 Reportar Bug](https://github.com/Alosk04/comanda-go/issues) • [💡 Solicitar Recurso](https://github.com/Alosk04/comanda-go/issues)
 
 </div>
+
+<br>
+
+<p align="center">
+  <img src="Screenshot_20260908_013143_Chrome.jpg" alt="Comanda Go Preview Dark Mode" width="100%" style="border-radius: 12px;">
+</p>
+
+---
+
+> ⭐️ **Apoie o projeto!** Se o **Comanda Go!** foi útil para você, para o seu negócio ou para os seus estudos, considere deixar uma estrela no repositório. Isso ajuda demais a dar visibilidade e motiva novas atualizações!
 
 ---
 
