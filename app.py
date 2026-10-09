@@ -1,249 +1,405 @@
-from flask import Flask, render_template_string
+from flask import Flask, request, jsonify, render_template_string
+import sqlite3
+from pathlib import Path
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 app = Flask(__name__)
+DB_PATH = Path(__file__).with_name("comanda_go.db")
 
-HTML_TEMPLATE = '''<!DOCTYPE html>
+
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_db():
+    with db() as c:
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'Geral',
+            price_cents INTEGER NOT NULL CHECK(price_cents >= 0),
+            active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT NOT NULL,
+            closed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS order_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL REFERENCES orders(id),
+            product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+            description TEXT NOT NULL,
+            unit_price_cents INTEGER NOT NULL,
+            quantity INTEGER NOT NULL CHECK(quantity > 0),
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL REFERENCES orders(id),
+            amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+            method TEXT NOT NULL,
+            received_cents INTEGER NOT NULL,
+            change_cents INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS cash_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            opening_cents INTEGER NOT NULL DEFAULT 0,
+            opened_at TEXT NOT NULL,
+            closed_at TEXT,
+            closing_cents INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS cash_movements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL REFERENCES cash_sessions(id),
+            kind TEXT NOT NULL,
+            description TEXT NOT NULL,
+            amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+            created_at TEXT NOT NULL
+        );
+        """)
+        count = c.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        if count == 0:
+            c.executemany(
+                "INSERT INTO products(name, category, price_cents) VALUES (?, ?, ?)",
+                [
+                    ("Água", "Bebidas", 300),
+                    ("Refrigerante", "Bebidas", 600),
+                    ("Cerveja", "Bebidas", 800),
+                    ("Hambúrguer", "Comidas", 1800),
+                    ("Batata frita", "Porções", 1600),
+                ],
+            )
+
+
+def now():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def cents(value):
+    try:
+        d = Decimal(str(value).replace(",", "."))
+        if not d.is_finite() or d < 0:
+            raise ValueError
+        return int((d * 100).quantize(Decimal("1")))
+    except (InvalidOperation, ValueError):
+        raise ValueError("Informe um valor válido e não negativo.")
+
+
+def money(n):
+    return f"R$ {n / 100:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def row_dict(row):
+    return dict(row) if row is not None else None
+
+
+def order_total(c, order_id):
+    items = c.execute(
+        "SELECT COALESCE(SUM(unit_price_cents * quantity),0) FROM order_items WHERE order_id=?",
+        (order_id,),
+    ).fetchone()[0]
+    paid = c.execute(
+        "SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE order_id=?",
+        (order_id,),
+    ).fetchone()[0]
+    return items, paid
+
+
+@app.get("/api/init")
+def api_init():
+    with db() as c:
+        products = [row_dict(r) for r in c.execute(
+            "SELECT id,name,category,price_cents FROM products WHERE active=1 ORDER BY category,name"
+        )]
+        orders = c.execute("""
+            SELECT o.*,
+            COALESCE((SELECT SUM(i.unit_price_cents*i.quantity) FROM order_items i WHERE i.order_id=o.id),0) AS total_cents,
+            COALESCE((SELECT SUM(p.amount_cents) FROM payments p WHERE p.order_id=o.id),0) AS paid_cents
+            FROM orders o WHERE o.status='open' ORDER BY o.id DESC
+        """).fetchall()
+        result_orders = []
+        for r in orders:
+            d = row_dict(r)
+            d["balance_cents"] = max(0, d["total_cents"] - d["paid_cents"])
+            d["items"] = [row_dict(i) for i in c.execute(
+                "SELECT id,description,unit_price_cents,quantity FROM order_items WHERE order_id=? ORDER BY id DESC",
+                (d["id"],)
+            )]
+            result_orders.append(d)
+        session = c.execute(
+            "SELECT * FROM cash_sessions WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        summary = c.execute("""
+            SELECT
+            COALESCE((SELECT SUM(amount_cents) FROM payments WHERE date(created_at)=date('now','localtime')),0) received,
+            COALESCE((SELECT SUM((SELECT COALESCE(SUM(i.unit_price_cents*i.quantity),0) FROM order_items i WHERE i.order_id=o.id) -
+                                  (SELECT COALESCE(SUM(p.amount_cents),0) FROM payments p WHERE p.order_id=o.id))
+                      FROM orders o WHERE o.status='open'),0) pending,
+            (SELECT COUNT(*) FROM orders WHERE status='open') open_count
+        """).fetchone()
+        return jsonify(products=products, orders=result_orders, session=row_dict(session),
+                       summary=row_dict(summary), methods=["PIX", "Dinheiro", "Débito", "Crédito"])
+
+
+@app.post("/api/products")
+def add_product():
+    data = request.get_json(force=True)
+    name = str(data.get("name", "")).strip()
+    category = str(data.get("category", "Geral")).strip() or "Geral"
+    if not name:
+        return jsonify(error="Informe o nome do produto."), 400
+    try:
+        price = cents(data.get("price", ""))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    with db() as c:
+        cur = c.execute("INSERT INTO products(name,category,price_cents) VALUES (?,?,?)",
+                        (name[:100], category[:50], price))
+        return jsonify(id=cur.lastrowid), 201
+
+
+@app.delete("/api/products/<int:pid>")
+def delete_product(pid):
+    with db() as c:
+        c.execute("UPDATE products SET active=0 WHERE id=?", (pid,))
+    return jsonify(ok=True)
+
+
+@app.post("/api/orders")
+def create_order():
+    data = request.get_json(force=True)
+    customer = str(data.get("customer", "")).strip()
+    if not customer:
+        return jsonify(error="Informe a mesa ou o nome do cliente."), 400
+    with db() as c:
+        cur = c.execute("INSERT INTO orders(customer,created_at) VALUES (?,?)", (customer[:100], now()))
+        return jsonify(id=cur.lastrowid), 201
+
+
+@app.post("/api/orders/<int:oid>/items")
+def add_item(oid):
+    data = request.get_json(force=True)
+    try:
+        qty = int(data.get("quantity", 1))
+        if qty < 1 or qty > 999:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify(error="Quantidade deve ser entre 1 e 999."), 400
+    with db() as c:
+        order = c.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()
+        if not order or order["status"] != "open":
+            return jsonify(error="Comanda não encontrada ou já encerrada."), 404
+        product_id = data.get("product_id")
+        if product_id:
+            product = c.execute("SELECT * FROM products WHERE id=? AND active=1", (product_id,)).fetchone()
+            if not product:
+                return jsonify(error="Produto não encontrado."), 404
+            desc, price = product["name"], product["price_cents"]
+            pid = product["id"]
+        else:
+            desc = str(data.get("description", "")).strip()
+            try:
+                price = cents(data.get("price", ""))
+            except ValueError as e:
+                return jsonify(error=str(e)), 400
+            if not desc:
+                return jsonify(error="Informe a descrição do item."), 400
+            desc, pid = desc[:100], None
+        c.execute("""INSERT INTO order_items(order_id,product_id,description,unit_price_cents,quantity,created_at)
+                     VALUES (?,?,?,?,?,?)""", (oid, pid, desc, price, qty, now()))
+    return jsonify(ok=True), 201
+
+
+@app.delete("/api/items/<int:item_id>")
+def remove_item(item_id):
+    with db() as c:
+        item = c.execute("""SELECT i.*,o.status FROM order_items i JOIN orders o ON o.id=i.order_id
+                            WHERE i.id=?""", (item_id,)).fetchone()
+        if not item or item["status"] != "open":
+            return jsonify(error="Item não encontrado ou comanda encerrada."), 404
+        paid = c.execute("SELECT COALESCE(SUM(amount_cents),0) FROM payments WHERE order_id=?",
+                         (item["order_id"],)).fetchone()[0]
+        if paid:
+            return jsonify(error="Não é possível remover itens após um pagamento parcial. Ajuste a conta pelo atendimento."), 409
+        c.execute("DELETE FROM order_items WHERE id=?", (item_id,))
+    return jsonify(ok=True)
+
+
+@app.post("/api/orders/<int:oid>/payments")
+def pay_order(oid):
+    data = request.get_json(force=True)
+    method = str(data.get("method", "")).strip()
+    if method not in {"PIX", "Dinheiro", "Débito", "Crédito"}:
+        return jsonify(error="Forma de pagamento inválida."), 400
+    with db() as c:
+        order = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+        if not order or order["status"] != "open":
+            return jsonify(error="Comanda não encontrada ou já encerrada."), 404
+        total, paid = order_total(c, oid)
+        balance = total - paid
+        if balance <= 0:
+            return jsonify(error="Esta comanda já está totalmente paga."), 400
+        try:
+            amount = cents(data.get("amount", balance / 100))
+            received = cents(data.get("received", amount / 100))
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        if amount <= 0 or amount > balance:
+            return jsonify(error=f"O pagamento deve ser maior que zero e não pode ultrapassar o saldo de {money(balance)}."), 400
+        change = 0
+        if method == "Dinheiro":
+            if received < amount:
+                return jsonify(error="O dinheiro recebido é menor que o valor do pagamento."), 400
+            change = received - amount
+        else:
+            received = amount
+        c.execute("""INSERT INTO payments(order_id,amount_cents,method,received_cents,change_cents,created_at)
+                     VALUES (?,?,?,?,?,?)""", (oid, amount, method, received, change, now()))
+        new_paid = paid + amount
+        if new_paid >= total:
+            c.execute("UPDATE orders SET status='paid',closed_at=? WHERE id=?", (now(), oid))
+    return jsonify(ok=True, change_cents=change, balance_cents=max(0, balance-amount))
+
+
+@app.post("/api/cash/open")
+def open_cash():
+    data = request.get_json(force=True)
+    try:
+        opening = cents(data.get("opening", 0))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    with db() as c:
+        existing = c.execute("SELECT id FROM cash_sessions WHERE closed_at IS NULL LIMIT 1").fetchone()
+        if existing:
+            return jsonify(error="Já existe um caixa aberto."), 409
+        cur = c.execute("INSERT INTO cash_sessions(opening_cents,opened_at) VALUES (?,?)", (opening, now()))
+        return jsonify(id=cur.lastrowid), 201
+
+
+@app.post("/api/cash/movements")
+def cash_movement():
+    data = request.get_json(force=True)
+    kind = str(data.get("kind", "")).lower()
+    description = str(data.get("description", "")).strip()
+    if kind not in {"expense", "withdrawal", "reinforcement"}:
+        return jsonify(error="Tipo de movimentação inválido."), 400
+    if not description:
+        return jsonify(error="Informe a descrição."), 400
+    try:
+        amount = cents(data.get("amount", ""))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    if amount <= 0:
+        return jsonify(error="O valor precisa ser maior que zero."), 400
+    with db() as c:
+        session = c.execute("SELECT id FROM cash_sessions WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+        if not session:
+            return jsonify(error="Abra o caixa antes de registrar movimentações."), 409
+        c.execute("""INSERT INTO cash_movements(session_id,kind,description,amount_cents,created_at)
+                     VALUES (?,?,?,?,?)""", (session["id"], kind, description[:150], amount, now()))
+    return jsonify(ok=True), 201
+
+
+@app.get("/api/cash/report")
+def cash_report():
+    with db() as c:
+        session = c.execute("SELECT * FROM cash_sessions WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+        payments = c.execute("""
+            SELECT method, SUM(amount_cents) total FROM payments
+            WHERE date(created_at)=date('now','localtime') GROUP BY method
+        """).fetchall()
+        movements = []
+        expected = 0
+        if session:
+            movements = [row_dict(r) for r in c.execute(
+                "SELECT * FROM cash_movements WHERE session_id=? ORDER BY id DESC", (session["id"],))]
+            ins = sum(r["amount_cents"] for r in movements if r["kind"] == "reinforcement")
+            outs = sum(r["amount_cents"] for r in movements if r["kind"] in ("expense", "withdrawal"))
+            cash_received = c.execute("""
+                SELECT COALESCE(SUM(amount_cents),0) FROM payments
+                WHERE method='Dinheiro' AND created_at>=?
+            """, (session["opened_at"],)).fetchone()[0]
+            expected = session["opening_cents"] + cash_received + ins - outs
+        return jsonify(session=row_dict(session), payments=[row_dict(r) for r in payments],
+                       movements=movements, expected_cents=expected)
+
+
+@app.post("/api/cash/close")
+def close_cash():
+    data = request.get_json(force=True)
+    try:
+        counted = cents(data.get("counted", 0))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    with db() as c:
+        session = c.execute("SELECT * FROM cash_sessions WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+        if not session:
+            return jsonify(error="Não há caixa aberto."), 409
+        c.execute("UPDATE cash_sessions SET closed_at=?,closing_cents=? WHERE id=?",
+                  (now(), counted, session["id"]))
+    return jsonify(ok=True)
+
+
+@app.get("/")
+def index():
+    return render_template_string(HTML)
+
+
+HTML = r"""<!doctype html>
 <html lang="pt-BR">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Comanda Go! - Controle de Comandas</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-        }
-    </script>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Comanda Go!</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={darkMode:'class'}</script>
+<style>
+body{padding-bottom:100px} .modal{display:none} .modal.show{display:flex}
+button,input,select{touch-action:manipulation} .card{border:1px solid #e5e7eb}
+.dark .card{border-color:#334155}
+</style>
 </head>
-<body class="bg-gray-50 dark:bg-slate-900 text-gray-800 dark:text-gray-100 font-sans pt-40 pb-44 flex flex-col min-h-screen select-none transition-colors duration-200">
-
-    <!-- Notificação Flutuante Toast -->
-    <div id="toast" class="fixed top-36 right-4 left-4 md:left-auto md:w-96 bg-gray-900 dark:bg-slate-800 text-white px-4 py-3.5 rounded-2xl shadow-2xl z-50 opacity-0 pointer-events-none transition-opacity duration-300 flex items-center gap-3 text-sm font-bold border border-gray-700">
-        <span id="toast-icon" class="text-xl">💡</span>
-        <div>
-            <p id="toast-title" class="text-[10px] text-red-400 uppercase tracking-wider">Aviso Comanda Go</p>
-            <span id="toast-msg" class="text-xs">Ação realizada com sucesso!</span>
-        </div>
-    </div>
-
-    <!-- TOPO FIXO -->
-    <header class="fixed top-0 left-0 right-0 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-gray-200 dark:border-slate-800 p-3 shadow-lg z-40">
-        <div class="max-w-6xl mx-auto space-y-2.5">
-            <!-- Barra Superior -->
-            <div class="flex justify-between items-center">
-                <h1 class="text-base font-extrabold flex items-center gap-1 text-red-600 dark:text-red-500">🚀 Comanda Go!</h1>
-                <div class="flex items-center gap-2">
-                    <button onclick="alternarTelaCheia()" id="btn-fullscreen" class="bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 px-3 py-2 rounded-xl text-xs font-bold border dark:border-slate-700 shadow-sm" title="Tela Cheia">⛶ Full</button>
-                    <button onclick="abrirModalProdutos()" class="bg-gray-100 dark:bg-slate-800 hover:bg-gray-200 text-gray-700 dark:text-gray-200 font-semibold px-3 py-2 rounded-xl shadow-sm transition text-xs border dark:border-slate-700">
-                        ⚙️ Produtos
-                    </button>
-                    <button onclick="alternarModoDark()" id="btn-tema" class="bg-gray-100 dark:bg-slate-800 px-3 py-2 rounded-xl text-xs font-bold border dark:border-slate-700 shadow-sm">🌙</button>
-                </div>
-            </div>
-
-            <!-- Resumo Rápido -->
-            <div class="grid grid-cols-2 gap-2.5">
-                <div class="bg-emerald-600 text-white px-3.5 py-2.5 rounded-2xl shadow flex justify-between items-center">
-                    <div>
-                        <p class="text-[10px] uppercase font-bold text-emerald-100">Recebido (Pago)</p>
-                        <h3 id="total-recebido" class="text-base font-extrabold">R$ 0,00</h3>
-                    </div>
-                    <span class="text-lg">💵</span>
-                </div>
-                <div class="bg-rose-600 text-white px-3.5 py-2.5 rounded-2xl shadow flex justify-between items-center">
-                    <div>
-                        <p class="text-[10px] uppercase font-bold text-rose-100">Pendente (Aberto)</p>
-                        <h3 id="total-pendente" class="text-base font-extrabold">R$ 0,00</h3>
-                    </div>
-                    <span class="text-lg">⏳</span>
-                </div>
-            </div>
-
-            <!-- Filtros Rápidos -->
-            <div class="flex gap-2 w-full">
-                <button onclick="filtrarStatus('todas')" id="btn-filtro-todas" class="flex-1 py-2 rounded-xl font-black text-xs shadow transition bg-gray-900 text-white dark:bg-slate-700">Todas</button>
-                <button onclick="filtrarStatus('abertas')" id="btn-filtro-abertas" class="flex-1 py-2 rounded-xl font-black text-xs shadow transition bg-white dark:bg-slate-800 text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-slate-700">Em Aberto</button>
-                <button onclick="filtrarStatus('pagas')" id="btn-filtro-pagas" class="flex-1 py-2 rounded-xl font-black text-xs shadow transition bg-white dark:bg-slate-800 text-gray-700 dark:text-gray-300 border border-gray-300 dark:border-slate-700">Pagas</button>
-            </div>
-        </div>
-    </header>
-
-    <!-- Conteúdo Principal -->
-    <main class="max-w-6xl mx-auto px-4 flex-grow w-full mt-2" id="area-swipe">
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4" id="lista-comandas">
-            <!-- Comandas aqui -->
-        </div>
-    </main>
-
-    <!-- RODAPÉ FIXO PARA O POLEGAR -->
-    <div class="fixed bottom-0 left-0 right-0 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-gray-200 dark:border-slate-800 p-3.5 shadow-2xl z-40">
-        <div class="max-w-6xl mx-auto space-y-2.5">
-            <div class="flex gap-2.5 w-full">
-                <button onclick="abrirBalcaoExpresso()" class="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-extrabold py-3.5 px-3 rounded-2xl shadow-lg transition text-xs flex items-center justify-center gap-1.5 active:scale-95">
-                    ⚡ Balcão
-                </button>
-                <button onclick="abrirModalNovoPedido()" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-extrabold py-3.5 px-3 rounded-2xl shadow-lg shadow-red-600/30 transition text-xs flex items-center justify-center gap-1.5 active:scale-95">
-                    + Nova Comanda
-                </button>
-                <button onclick="abrirResumoCaixa()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 px-4 rounded-2xl shadow-lg shadow-emerald-600/30 transition text-xs flex items-center justify-center gap-1.5 active:scale-95">
-                    📊 Caixa
-                </button>
-            </div>
-            
-            <div class="text-center text-[10px] text-gray-500 dark:text-gray-400 pt-1.5 border-t border-gray-100 dark:border-slate-800/60">
-                &copy; 2026 Comanda Go! • Desenvolvido por <a href="https://instagram.com/alisonfreitas__" target="_blank" class="text-red-600 dark:text-red-400 font-bold hover:underline">Alison Freitas</a>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modais -->
-    <div id="modal-tutorial" class="fixed inset-0 bg-black bg-opacity-60 hidden flex justify-center items-center p-4 z-50">
-        <div class="bg-white dark:bg-slate-800 rounded-3xl shadow-2xl max-w-md w-full p-6 transition-colors border border-gray-100 dark:border-slate-700">
-            <div class="text-center mb-4">
-                <span class="text-4xl">👋</span>
-                <h2 class="text-xl font-black text-gray-800 dark:text-gray-100 mt-2">Bem-vindo ao Comanda Go!</h2>
-                <p class="text-xs text-red-600 dark:text-red-400 font-bold mt-1">Dicas rápidas para começar:</p>
-            </div>
-            <div class="space-y-3 mb-6 text-xs text-gray-600 dark:text-gray-300">
-                <div class="flex items-start gap-2.5 bg-gray-50 dark:bg-slate-900 p-3 rounded-2xl border dark:border-slate-700">
-                    <span class="text-base">⛶</span>
-                    <div><strong class="text-gray-800 dark:text-gray-200 block mb-0.5">Modo Tela Cheia</strong>Use o botão "Full" no topo para ocultar as barras do navegador.</div>
-                </div>
-            </div>
-            <div class="flex gap-2">
-                <button onclick="fecharTutorial(true)" class="w-1/2 bg-gray-200 dark:bg-slate-700 text-gray-700 dark:text-gray-200 py-3.5 rounded-2xl font-bold text-xs">Não mostrar hoje</button>
-                <button onclick="fecharTutorial(false)" class="w-1/2 bg-red-600 text-white py-3.5 rounded-2xl font-bold text-xs shadow-lg shadow-red-600/30">Começar 🚀</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modal Nova Comanda -->
-    <div id="modal-pedido" class="fixed inset-0 bg-black bg-opacity-50 hidden flex justify-center items-center p-4 z-50">
-        <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 transition-colors">
-            <h2 class="text-lg font-bold mb-4 text-gray-800 dark:text-gray-100">Abrir Nova Comanda</h2>
-            <div class="mb-4">
-                <label class="block text-xs font-bold uppercase text-gray-600 dark:text-gray-400 mb-1">Mesa ou Nome do Cliente</label>
-                <input type="text" id="nome-cliente" placeholder="Ex: Mesa 03 ou João" class="w-full border-2 border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-gray-800 dark:text-gray-100 rounded-xl p-3.5 text-base focus:border-red-500 focus:outline-none">
-            </div>
-            <div class="flex space-x-2">
-                <button onclick="fecharModalNovoPedido()" class="w-1/2 bg-gray-200 dark:bg-slate-700 text-gray-700 dark:text-gray-200 py-3.5 rounded-xl font-bold">Cancelar</button>
-                <button onclick="salvarPedido()" class="w-1/2 bg-red-600 text-white py-3.5 rounded-xl font-bold hover:bg-red-700">Criar Comanda</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modal Pagamento -->
-    <div id="modal-pagamento" class="fixed inset-0 bg-black bg-opacity-50 hidden flex justify-center items-center p-4 z-50">
-        <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 transition-colors">
-            <h2 class="text-lg font-bold mb-1 text-gray-800 dark:text-gray-100">Receber Pagamento</h2>
-            <p id="pag-info-cliente" class="text-xs text-gray-500 dark:text-gray-400 mb-4 font-bold uppercase"></p>
-            <input type="hidden" id="pag-id-comanda">
-            <div class="bg-gray-50 dark:bg-slate-900 p-4 rounded-xl mb-4 border dark:border-slate-700">
-                <div class="flex justify-between mb-3 items-center">
-                    <span class="text-sm font-bold text-gray-600 dark:text-gray-400">Total a Pagar:</span>
-                    <span id="pag-valor-total" class="text-xl font-extrabold text-gray-800 dark:text-gray-100">R$ 0,00</span>
-                </div>
-                <div class="mb-3">
-                    <label class="block text-xs font-bold uppercase text-gray-700 dark:text-gray-300 mb-1">Dinheiro Recebido (R$)</label>
-                    <input type="number" step="0.01" id="valor-recebido" oninput="calcularTroco()" placeholder="0.00" class="w-full border-2 border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-gray-800 dark:text-gray-100 rounded-xl p-3.5 text-lg font-extrabold focus:border-emerald-500 focus:outline-none">
-                </div>
-                <div class="grid grid-cols-5 gap-1.5 mb-3">
-                    <button onclick="setarValorRecebido(0)" class="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-xl py-2.5 text-xs font-bold text-gray-700 dark:text-gray-200 shadow-sm">Exato</button>
-                    <button onclick="setarValorRecebido(10)" class="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-xl py-2.5 text-xs font-bold text-gray-700 dark:text-gray-200 shadow-sm">10</button>
-                    <button onclick="setarValorRecebido(20)" class="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-xl py-2.5 text-xs font-bold text-gray-700 dark:text-gray-200 shadow-sm">20</button>
-                    <button onclick="setarValorRecebido(50)" class="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-xl py-2.5 text-xs font-bold text-gray-700 dark:text-gray-200 shadow-sm">50</button>
-                    <button onclick="setarValorRecebido(100)" class="bg-white dark:bg-slate-800 border dark:border-slate-700 rounded-xl py-2.5 text-xs font-bold text-gray-700 dark:text-gray-200 shadow-sm">100</button>
-                </div>
-                <div class="flex justify-between items-center bg-emerald-50 dark:bg-emerald-950/40 p-3.5 rounded-xl border border-emerald-200 dark:border-emerald-800">
-                    <span class="text-xs font-bold text-emerald-800 dark:text-emerald-300 uppercase">Troco:</span>
-                    <span id="troco-calculado" class="text-lg font-black text-emerald-700 dark:text-emerald-400">R$ 0,00</span>
-                </div>
-            </div>
-            <div class="flex space-x-2">
-                <button onclick="fecharModalPagamento()" class="w-1/2 bg-gray-200 dark:bg-slate-700 text-gray-700 dark:text-gray-200 py-3.5 rounded-xl font-bold text-sm">Cancelar</button>
-                <button onclick="confirmarRecebimento()" class="w-1/2 bg-emerald-600 text-white py-3.5 rounded-xl font-bold text-sm hover:bg-emerald-700 shadow-lg shadow-emerald-600/30">Baixar Conta</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modal Caixa -->
-    <div id="modal-caixa" class="fixed inset-0 bg-black bg-opacity-50 hidden flex justify-center items-center p-4 z-50">
-        <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-lg w-full p-6 max-h-[90vh] flex flex-col transition-colors">
-            <h2 class="text-lg font-bold mb-3 text-gray-800 dark:text-gray-100">📊 Fechamento e Extrato de Caixa</h2>
-            
-            <div id="conteudo-relatorio-caixa" class="space-y-2 mb-4 text-xs text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-slate-900 p-3.5 rounded-xl border dark:border-slate-700"></div>
-
-            <h3 class="text-xs font-bold uppercase text-gray-500 dark:text-gray-400 mb-1.5">🧾 Via Detalhada (Consumo por Mesa):</h3>
-            <div id="via-detalhada-mesas" class="space-y-2 mb-4 overflow-y-auto max-h-52 pr-1 border dark:border-slate-700 p-2.5 rounded-xl bg-gray-50 dark:bg-slate-900"></div>
-
-            <div class="space-y-2 mt-auto">
-                <button onclick="gerarPdfCaixa()" class="w-full bg-red-600 hover:bg-red-700 text-white py-3.5 rounded-xl font-bold text-xs shadow-lg shadow-red-600/30">📄 Baixar PDF do Caixa do Dia</button>
-                <button onclick="limparCaixaDoDia()" class="w-full bg-rose-100 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 py-3.5 rounded-xl font-bold text-xs">🗑️ Limpar Contas Pagas do Dia</button>
-                <button onclick="fecharResumoCaixa()" class="w-full bg-gray-800 dark:bg-slate-700 text-white py-3.5 rounded-xl font-bold text-xs">Fechar</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modal Adicionar Consumo -->
-    <div id="modal-adicionar" class="fixed inset-0 bg-black bg-opacity-50 hidden flex justify-center items-center p-4 z-50">
-        <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-lg w-full p-6 max-h-[90vh] flex flex-col transition-colors">
-            <!-- Cabeçalho do Modal -->
-            <div class="mb-3 bg-emerald-50 dark:bg-emerald-950/40 p-3 rounded-xl border border-emerald-200 dark:border-emerald-800">
-                <h2 class="text-sm font-extrabold text-emerald-900 dark:text-emerald-200">Lançar Consumo</h2>
-                <p id="titulo-cliente-add" class="text-xs text-emerald-700 dark:text-emerald-400 font-bold uppercase"></p>
-            </div>
-            
-            <input type="hidden" id="add-id-comanda">
-            
-            <div class="bg-gray-50 dark:bg-slate-900 p-3.5 rounded-xl mb-3 border dark:border-slate-700 space-y-2.5">
-                <div class="flex items-center justify-between">
-                    <label class="text-xs font-bold text-gray-700 dark:text-gray-300 uppercase">Qtd por clique:</label>
-                    <div class="flex items-center gap-1.5">
-                        <button onclick="alterarQtdLote(-1)" class="bg-white dark:bg-slate-800 border-2 dark:border-slate-700 font-bold w-10 h-10 rounded-xl shadow-sm">-</button>
-                        <input type="number" id="input-qtd-lote" value="1" min="1" onclick="this.select()" class="w-16 text-center font-black bg-white dark:bg-slate-800 border-2 dark:border-slate-700 rounded-xl p-1.5 text-base focus:outline-none">
-                        <button onclick="alterarQtdLote(1)" class="bg-white dark:bg-slate-800 border-2 dark:border-slate-700 font-bold w-10 h-10 rounded-xl shadow-sm">+</button>
-                    </div>
-                </div>
-                <div>
-                    <input type="text" id="busca-produto" oninput="filtrarProdutosModal()" placeholder="🔍 Buscar produto..." class="w-full border-2 border-gray-200 dark:border-slate-700 rounded-xl p-3 text-sm focus:outline-none bg-white dark:bg-slate-800 text-gray-800 dark:text-gray-100">
-                </div>
-                <div class="flex gap-1.5 overflow-x-auto pb-1" id="abas-categorias"></div>
-            </div>
-
-            <div id="botoes-produtos-rapidos" class="grid grid-cols-2 gap-2.5 overflow-y-auto max-h-56 mb-3 pr-1"></div>
-
-            <div class="border-t dark:border-slate-700 pt-3 mt-auto space-y-2">
-                <div class="flex gap-2">
-                    <input type="text" id="manual-desc" placeholder="Item avulso" class="w-1/2 border-2 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-xl p-3 text-xs focus:outline-none">
-                    <input type="number" step="0.01" id="manual-valor" placeholder="Valor (R$)" class="w-1/4 border-2 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-xl p-3 text-xs focus:outline-none">
-                    <button onclick="adicionarItemManual()" class="w-1/4 bg-gray-800 dark:bg-slate-700 text-white rounded-xl text-xs font-bold py-3">+ Adicionar</button>
-                </div>
-                <!-- Botão Pronto Movido para Baixo -->
-                <button onclick="fecharModalAdicionar()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 rounded-xl text-sm shadow-lg shadow-emerald-600/30 transition">✓ Pronto (Concluir)</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Modal Gerenciar Produtos -->
-    <div id="modal-produtos" class="fixed inset-0 bg-black bg-opacity-50 hidden flex justify-center items-center p-4 z-50">
-        <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto transition-colors">
-            <h2 class="text-lg font-bold mb-3 text-gray-800 dark:text-gray-100">⚙️ Gerenciar Produtos</h2>
-            <div class="bg-gray-50 dark:bg-slate-900 p-3.5 rounded-xl mb-4 border dark:border-slate-700 space-y-2.5">
-                <div>
-                    <label class="block text-xs font-bold uppercase text-gray-600 dark:text-gray-400 mb-1">Nome do Produto</label>
-                    <input type="text" id="prod-nome" placeholder="Ex: Cerveja" class="w-full border-2 dark:border-slate-700 rounded-xl p-3 text-sm focus:outline-none bg-white dark:bg-slate-800 text-gray-800 dark:text-gray-100">
-                </div>
-                <div class="flex gap-2">
-                    <div class="w-1/2">
-                        <label class="block text-xs font-bold uppercase text-gray-600 dark:text-gray-400 mb-1">Preço (R$)</label>
-                        <input type="number" step="0.01" id="prod-preco" placeholder="0.00" class="w-full border-2 dark:border-slate-700 rounded-xl p-3 text-sm focus:outline-none bg-white dark:bg-slate-800 text-gray-800 dark:text-gray-100">
-                    </div>
-                    <div class="w-1/2">
-                        <label class="block text-xs font-bold uppercase text-gray-600 dark:text-gray-400 mb-1">Categoria</label>
-                        <input type="text" id="prod-cat" placeholder="Ex: Bebida" class="w-full border-2 dark:border-slate-700 rounded-xl p-3 text-sm focus:outline-none bg-white dark:bg-slate-800 text-gray-800 dark:text-gray-100 uppercase">
-                    </div>
-                </div>
-                <button onclick="salvarNovoProduto()" class="w-full bg-red-600 text-white py-3.5 rounded-xl text-sm font-bold hover:bg-red-700 shadow-lg shadow-red-600/30">+ Cadastrar Produto</button>
-            </div>
-            <h3 class="text-xs font
+<body class="bg-gray-50 text-gray-800 dark:bg-slate-900 dark:text-gray-100 min-h-screen">
+<header class="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur border-b dark:border-slate-700 shadow-sm">
+ <div class="max-w-6xl mx-auto p-3 space-y-3">
+  <div class="flex items-center justify-between gap-2"><h1 class="font-black text-xl text-red-600">🚀 Comanda Go!</h1>
+   <div class="flex gap-2"><button class="btn" onclick="toggleTheme()">🌙 Tema</button><button class="btn" onclick="openProducts()">⚙️ Produtos</button></div>
+  </div>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+   <div class="rounded-xl p-3 bg-emerald-600 text-white"><p class="text-xs">Recebido hoje</p><strong id="received" class="text-lg">R$ 0,00</strong></div>
+   <div class="rounded-xl p-3 bg-rose-600 text-white"><p class="text-xs">Pendente aberto</p><strong id="pending" class="text-lg">R$ 0,00</strong></div>
+   <div class="rounded-xl p-3 bg-sky-700 text-white"><p class="text-xs">Comandas abertas</p><strong id="openCount" class="text-lg">0</strong></div>
+   <div class="rounded-xl p-3 bg-amber-500 text-white"><p class="text-xs">Caixa</p><strong id="cashStatus" class="text-lg">Fechado</strong></div>
+  </div>
+  <div class="flex gap-2"><input id="search" class="field flex-1" placeholder="🔍 Buscar mesa ou cliente..." oninput="renderOrders()">
+   <button class="btn" onclick="load()">↻ Atualizar</button></div>
+ </div>
+</header>
+<main class="max-w-6xl mx-auto p-3">
+ <div class="flex flex-wrap gap-2 mb-4">
+  <button class="primary" onclick="newOrder()">＋ Nova comanda</button>
+  <button class="amber" onclick="newOrder(true)">⚡ Balcão expresso</button>
+  <button class="green" onclick="openCash()">📊 Caixa</button>
+ </div>
+ <div class="flex items-center justify-between mb-3"><h2 class="font-black text-lg">Comandas abertas</h2><span class="text-xs text-gray-500">Toque em uma comanda para lançar consumo</span></div>
+ <div id="orders" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3"></div>
+</main>
+<div id="toast" class="fixed bottom-24 left-4 right-4 md:left-auto md:w-96 bg-slate-900 text-white p-4 rounded-xl shadow-xl z-50 hidden"></div>
+<div id="orderModal" class="modal fixed inset-0 bg-black/60 z-40 items-center justify-center p-3"><section class="bg-white dark:bg-slate-800 rounded-2xl p-4 w-full max-w-xl max-h-[92vh] overflow-y-auto">
+ <div class="flex justify-between gap-2 items-start"><div><h2 id="orderTitle" class="font-black text-lg">Comanda</h2><p id="orderTotal" class="text-sm text-gray-500"></p></div><button class="btn" onclick="closeModal('orderModal')">✕</button></div>
+ <div class="grid grid-cols-2 gap-2 my-3"><input id="productSearch" class="field col-span-2" placeholder="Buscar produto..." oninput="renderProducts()"><select id="category" class="field col-span-2" onchange="renderProducts()"><option value="">Todas as categorias</option></select></div>
+ <div id="productButtons" class="grid grid-cols-2 sm:grid-cols-3 gap-2"></div>
+ <div class="border-t dark:border-slate-700 mt-4 pt-3"><h3 class="font-bold mb-2">Consumo lançado</h3><div id="items" class="space-y-2"></div></div>
+ <div class="mt-4 p-3 rounded-xl bg-gray-50 dark:bg-slate-900"><h3 class="font-bold mb-2">Item avulso</h3><div class="grid grid-cols-2 gap-2"><input id="manualName" class="field" placeholder="Descrição"><input id="manualPrice" class="field" type="number" min="0" step=".01" placeholder="Preço R$"><input id="manualQty" class="field" type="number" min="1" value="1" placeholder="Qtd"><button class="primary" onclick="addManual()">Adicionar</button></div></div>
+ <div class="flex gap-2 mt-4"><button class="green flex-1" onclick="openPayment()">💵 Receber pagamento</button><button class="btn" onclick="closeModal('orderModal')">Pronto</button></div>
+ </section></div>
+<div id="newModal" class="modal fixed inset-0 bg-black/60 z-40 items-center justify-center p-3"><section class="bg-white dark:bg-slate-800 rounded-2xl p-5 w-full max-w-md"><h2 class="font-black text-lg mb-3">Nova comanda</h2><input id="customer" class="field w-full mb-3" placeholder="Mesa 03 ou nome do cliente"><div class="flex gap-2"><button class="btn flex-1" onclick="closeModal('newModal')">Cancelar</button><button class="primary flex-1" onclick="createOrder()">Criar</button></div></section></div>
+<div id="payModal" class="modal fixed inset-0 bg-black/60 z-50 items-center justify-center p-3"><section class="bg-white dark:bg-slate-800 rounded-2xl p-5 w-full max-w-md"><h2 class="font-black text-lg">Receber pagamento</h2><p id="payBalance" class="text-2xl font-black text-emerald-600 my-3"></p><label class="label">Valor deste pagamento (R$)</label><input id="payAmount"
