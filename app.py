@@ -1,18 +1,32 @@
-from flask import Flask, request, jsonify, render_template_string
+import os
 import sqlite3
-from pathlib import Path
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
+
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
-DB_PATH = Path(__file__).with_name("comanda_go.db")
+DB_PATH = Path(os.environ.get("COMANDA_DB", Path(__file__).with_name("comanda_go.db")))
+MAX_CENTS = 10**11  # limite de segurança (R$ 1 bilhão)
+PAYMENT_METHODS = {"PIX", "Dinheiro", "Débito", "Crédito"}
 
 
+@contextmanager
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    """Abre a conexão, faz commit/rollback e SEMPRE fecha ao final."""
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -65,6 +79,9 @@ def init_db():
             amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
             created_at TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id);
+        CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(order_id);
+        CREATE INDEX IF NOT EXISTS idx_movements_session ON cash_movements(session_id);
         """)
         count = c.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         if count == 0:
@@ -84,12 +101,26 @@ def now():
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def today():
+    """Data local de hoje (YYYY-MM-DD), compatível com o início de created_at."""
+    return datetime.now().astimezone().date().isoformat()
+
+
+def body():
+    """Lê o JSON da requisição sem derrubar a API se vier inválido."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
 def cents(value):
     try:
         d = Decimal(str(value).replace(",", "."))
         if not d.is_finite() or d < 0:
             raise ValueError
-        return int((d * 100).quantize(Decimal("1")))
+        result = int((d * 100).quantize(Decimal("1")))
+        if result > MAX_CENTS:
+            raise ValueError
+        return result
     except (InvalidOperation, ValueError):
         raise ValueError("Informe um valor válido e não negativo.")
 
@@ -138,21 +169,24 @@ def api_init():
         session = c.execute(
             "SELECT * FROM cash_sessions WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1"
         ).fetchone()
+        # created_at é ISO com fuso (ex.: 2026-10-08T22:41:00-03:00). Usar date() do SQLite
+        # converteria para UTC e jogaria vendas da noite para o "dia seguinte";
+        # por isso comparamos os 10 primeiros caracteres (data local).
         summary = c.execute("""
             SELECT
-            COALESCE((SELECT SUM(amount_cents) FROM payments WHERE date(created_at)=date('now','localtime')),0) received,
+            COALESCE((SELECT SUM(amount_cents) FROM payments WHERE substr(created_at,1,10)=?),0) received,
             COALESCE((SELECT SUM((SELECT COALESCE(SUM(i.unit_price_cents*i.quantity),0) FROM order_items i WHERE i.order_id=o.id) -
                                   (SELECT COALESCE(SUM(p.amount_cents),0) FROM payments p WHERE p.order_id=o.id))
                       FROM orders o WHERE o.status='open'),0) pending,
             (SELECT COUNT(*) FROM orders WHERE status='open') open_count
-        """).fetchone()
+        """, (today(),)).fetchone()
         return jsonify(products=products, orders=result_orders, session=row_dict(session),
-                       summary=row_dict(summary), methods=["PIX", "Dinheiro", "Débito", "Crédito"])
+                       summary=row_dict(summary), methods=sorted(PAYMENT_METHODS))
 
 
 @app.post("/api/products")
 def add_product():
-    data = request.get_json(force=True)
+    data = body()
     name = str(data.get("name", "")).strip()
     category = str(data.get("category", "Geral")).strip() or "Geral"
     if not name:
@@ -176,7 +210,7 @@ def delete_product(pid):
 
 @app.post("/api/orders")
 def create_order():
-    data = request.get_json(force=True)
+    data = body()
     customer = str(data.get("customer", "")).strip()
     if not customer:
         return jsonify(error="Informe a mesa ou o nome do cliente."), 400
@@ -187,7 +221,7 @@ def create_order():
 
 @app.post("/api/orders/<int:oid>/items")
 def add_item(oid):
-    data = request.get_json(force=True)
+    data = body()
     try:
         qty = int(data.get("quantity", 1))
         if qty < 1 or qty > 999:
@@ -236,9 +270,9 @@ def remove_item(item_id):
 
 @app.post("/api/orders/<int:oid>/payments")
 def pay_order(oid):
-    data = request.get_json(force=True)
+    data = body()
     method = str(data.get("method", "")).strip()
-    if method not in {"PIX", "Dinheiro", "Débito", "Crédito"}:
+    if method not in PAYMENT_METHODS:
         return jsonify(error="Forma de pagamento inválida."), 400
     with db() as c:
         order = c.execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
@@ -250,29 +284,32 @@ def pay_order(oid):
             return jsonify(error="Esta comanda já está totalmente paga."), 400
         try:
             amount = cents(data.get("amount", balance / 100))
-            received = cents(data.get("received", amount / 100))
         except ValueError as e:
             return jsonify(error=str(e)), 400
         if amount <= 0 or amount > balance:
             return jsonify(error=f"O pagamento deve ser maior que zero e não pode ultrapassar o saldo de {money(balance)}."), 400
         change = 0
+        received = amount
         if method == "Dinheiro":
+            # "recebido" só é lido (e validado) quando o pagamento é em dinheiro
+            try:
+                received = cents(data.get("received", amount / 100))
+            except ValueError as e:
+                return jsonify(error=str(e)), 400
             if received < amount:
                 return jsonify(error="O dinheiro recebido é menor que o valor do pagamento."), 400
             change = received - amount
-        else:
-            received = amount
         c.execute("""INSERT INTO payments(order_id,amount_cents,method,received_cents,change_cents,created_at)
                      VALUES (?,?,?,?,?,?)""", (oid, amount, method, received, change, now()))
         new_paid = paid + amount
         if new_paid >= total:
             c.execute("UPDATE orders SET status='paid',closed_at=? WHERE id=?", (now(), oid))
-    return jsonify(ok=True, change_cents=change, balance_cents=max(0, balance-amount))
+    return jsonify(ok=True, change_cents=change, balance_cents=max(0, balance - amount))
 
 
 @app.post("/api/cash/open")
 def open_cash():
-    data = request.get_json(force=True)
+    data = body()
     try:
         opening = cents(data.get("opening", 0))
     except ValueError as e:
@@ -287,7 +324,7 @@ def open_cash():
 
 @app.post("/api/cash/movements")
 def cash_movement():
-    data = request.get_json(force=True)
+    data = body()
     kind = str(data.get("kind", "")).lower()
     description = str(data.get("description", "")).strip()
     if kind not in {"expense", "withdrawal", "reinforcement"}:
@@ -315,8 +352,8 @@ def cash_report():
         session = c.execute("SELECT * FROM cash_sessions WHERE closed_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()
         payments = c.execute("""
             SELECT method, SUM(amount_cents) total FROM payments
-            WHERE date(created_at)=date('now','localtime') GROUP BY method
-        """).fetchall()
+            WHERE substr(created_at,1,10)=? GROUP BY method
+        """, (today(),)).fetchall()
         movements = []
         expected = 0
         if session:
@@ -335,7 +372,7 @@ def cash_report():
 
 @app.post("/api/cash/close")
 def close_cash():
-    data = request.get_json(force=True)
+    data = body()
     try:
         counted = cents(data.get("counted", 0))
     except ValueError as e:
@@ -351,7 +388,8 @@ def close_cash():
 
 @app.get("/")
 def index():
-    return render_template_string(HTML)
+    # HTML puro (sem Jinja): o JS usa muitas chaves e ${...} e não há variáveis de template.
+    return HTML
 
 
 HTML = r"""<!doctype html>
@@ -398,8 +436,4 @@ button,input,select{touch-action:manipulation} .card{border:1px solid #e5e7eb}
  <div class="grid grid-cols-2 gap-2 my-3"><input id="productSearch" class="field col-span-2" placeholder="Buscar produto..." oninput="renderProducts()"><select id="category" class="field col-span-2" onchange="renderProducts()"><option value="">Todas as categorias</option></select></div>
  <div id="productButtons" class="grid grid-cols-2 sm:grid-cols-3 gap-2"></div>
  <div class="border-t dark:border-slate-700 mt-4 pt-3"><h3 class="font-bold mb-2">Consumo lançado</h3><div id="items" class="space-y-2"></div></div>
- <div class="mt-4 p-3 rounded-xl bg-gray-50 dark:bg-slate-900"><h3 class="font-bold mb-2">Item avulso</h3><div class="grid grid-cols-2 gap-2"><input id="manualName" class="field" placeholder="Descrição"><input id="manualPrice" class="field" type="number" min="0" step=".01" placeholder="Preço R$"><input id="manualQty" class="field" type="number" min="1" value="1" placeholder="Qtd"><button class="primary" onclick="addManual()">Adicionar</button></div></div>
- <div class="flex gap-2 mt-4"><button class="green flex-1" onclick="openPayment()">💵 Receber pagamento</button><button class="btn" onclick="closeModal('orderModal')">Pronto</button></div>
- </section></div>
-<div id="newModal" class="modal fixed inset-0 bg-black/60 z-40 items-center justify-center p-3"><section class="bg-white dark:bg-slate-800 rounded-2xl p-5 w-full max-w-md"><h2 class="font-black text-lg mb-3">Nova comanda</h2><input id="customer" class="field w-full mb-3" placeholder="Mesa 03 ou nome do cliente"><div class="flex gap-2"><button class="btn flex-1" onclick="closeModal('newModal')">Cancelar</button><button class="primary flex-1" onclick="createOrder()">Criar</button></div></section></div>
-<div id="payModal" class="modal fixed inset-0 bg-black/60 z-50 items-center justify-center p-3"><section class="bg-white dark:bg-slate-800 rounded-2xl p-5 w-full max-w-md"><h2 class="font-black text-lg">Receber pagamento</h2><p id="payBalance" class="text-2xl font-black text-emerald-600 my-3"></p><label class="label">Valor deste pagamento (R$)</label><input id="payAmount"
+ <div class="mt-4 p-3 rounded-xl bg-gray-50 dark:bg-slate-900"><h3 class="font-bold mb-2">Item avulso</h3><div class="grid grid-cols-2 gap-2"><input id="manualName" class="field" placeholder="Descrição"><i
